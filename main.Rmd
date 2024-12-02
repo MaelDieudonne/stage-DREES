@@ -1,0 +1,296 @@
+
+# Configuration
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(ggstats)
+  library(glue)
+  library(gt)
+  library(gtsummary)
+  library(haven)
+  library(infer)
+  library(labelled)
+  library(lubridate)
+  library(nnet) # pour les régressions logistiques multinomiales
+  library(RColorBrewer)
+  library(rlang)
+  library(stringr)
+  library(survey) # pour les calculs de précision intégrant les poids de sondage
+  library(tidyr)
+})
+
+if(!dir.exists(glue("output"))) {dir.create(glue("output"))}
+if(!dir.exists(glue("output/declarations"))) {dir.create(glue("output/declarations"))}
+if(!dir.exists(glue("output/sample"))) {dir.create(glue("output/sample"))}
+if(!dir.exists(glue("output/multinom_tables"))) {dir.create(glue("output/multinom_tables"))}
+if(!dir.exists(glue("output/multinom_graphs"))) {dir.create(glue("output/multinom_graphs"))}
+
+Sys.setlocale("LC_ALL", "French_France.UTF-8")
+```
+
+# Données
+
+```{r}
+source("1_load_data.R", encoding = "UTF8")
+```
+
+Une incohérence apparaît dans les PCS en métropole. Les PCS sont encodées dans la variable cstot prenant des valeurs entre 71 et 78 pour les retraités. La situation professionnelle est encodée dans la variable situa prenant la valeur 06 pour les retraités. Les effectifs sont cohérents dans les DROM à 0,02 % près, mais en métropole, 4000 retraités sont identifiés par leur situation professionnelle contre aucun par les PCS !
+
+```{r}
+n <- ehis_metro %>% filter(cstot %in% 70:79) %>% nrow()
+cat("Nombre de retraités en métropole d'après les PCS :", n)
+n <- ehis_metro %>% filter(situa == 06) %>% nrow()
+cat("\nNombre de retraités en métropole d'après la situation professionnelle :", n)
+cat("\n")
+n <- ehis_drom %>% filter(cstot %in% 70:79) %>% nrow()
+cat("\nNombre de retraités dans les DROM d'après les PCS :", n)
+n <- ehis_drom %>% filter(situa == 06) %>% nrow()
+cat("\nNombre de retraités dans les DROM d'après la situation professionnelle :", n)
+rm(n)
+```
+
+```{r eval=FALSE}
+# Pour ajouter les AVC et coronaropathies selon leur ancienneté dans la liste des maladies étudiées
+target <- target %>%
+  rbind(data.frame(
+    names = "AVC old",
+    abbr = "stroke_old",
+     ehis_codes = I(list("cd1f")),
+    snds_codes = I(list(c("TOP_CVAVC_AIG", "TOP_CVAVC_SEQ", "TOP_CVAVC_AIG_PAST")))
+    )) %>%
+  rbind(data.frame(
+    names = "Coronaropathies >12m",
+    abbr = "coropath_old",
+    ehis_codes = I(list(c("cd1c", "cd1d"))),
+    snds_codes = I(list(c("TOP_CVIDM_AIG", "TOP_CVCORON_CHR", "TOP_CVIDM_AIG_PAST")))
+    )) %>%
+  rbind(data.frame(
+    names = "Coronaropathies <=12m",
+    abbr = "coropath_aig",
+    ehis_codes = I(list(c("cd1c", "cd1d"))),
+    snds_codes = I(list(c("TOP_CVIDM_AIG")))
+  ))
+```
+
+```{r}
+source("2_pairing.R", encoding = "UTF8")
+source("3_prepare_data.R", encoding = "UTF8")
+```
+
+```{r eval=FALSE}
+#  Ancienneté du dernier AVC et de la dernière coronaropathie
+
+# Pour la cartographie 2018
+for (yr in 2015:2017) {
+  data_file <- 
+    get(glue("data_{yr}_metro")) %>%
+    select(NUM_ENQ, TOP_CVIDM_AIG, TOP_CVAVC_AIG) %>%
+    rename(!!glue("TOP_CVIDM_AIG_{yr}") := TOP_CVIDM_AIG, !!glue("TOP_CVAVC_AIG_{yr}") := TOP_CVAVC_AIG) %>%
+    right_join(data_2018_metro, by = "NUM_ENQ")
+  
+  assign(glue("data_2018_metro"), data_file)
+  rm(data_file)
+  
+  data_file <- 
+    get(glue("data_{yr}_drom")) %>%
+    select(IDENT_IND, TOP_CVIDM_AIG, TOP_CVAVC_AIG) %>%
+    distinct(IDENT_IND, .keep_all = TRUE) %>%
+    rename(!!glue("TOP_CVIDM_AIG_{yr}") := TOP_CVIDM_AIG, !!glue("TOP_CVAVC_AIG_{yr}") := TOP_CVAVC_AIG) %>%
+    right_join(data_2018_drom, by = "IDENT_IND")
+  
+  assign(glue("data_2018_drom"), data_file)
+  rm(data_file)
+}
+
+for (plc in c("metro", "drom")) {
+  data_file <- 
+    get(glue("data_2018_{plc}")) %>%
+    mutate(
+      TOP_CVAVC_AIG_PAST = case_when(
+        TOP_CVAVC_AIG_2015 == 1 ~ 1,
+        TOP_CVAVC_AIG_2016 == 1 ~ 1,
+        TOP_CVAVC_AIG_2017 == 1 ~ 1,
+        TOP_CVAVC_AIG == 1 ~ 0,
+        TRUE ~ 0),
+      TOP_CVIDM_AIG_PAST = case_when(
+        TOP_CVIDM_AIG_2015 == 1 ~ 1,
+        TOP_CVIDM_AIG_2016 == 1 ~ 1,
+        TOP_CVIDM_AIG_2017 == 1 ~ 1,
+        TOP_CVIDM_AIG == 1 ~ 0,
+        TRUE ~ 0)
+    )
+  
+  assign(glue("data_2018_{plc}"), data_file)
+  rm(data_file)
+}
+
+# Pour la cartographie 2019
+for (yr in 2015:2018) {
+  data_file <- 
+    get(glue("data_{yr}_metro")) %>%
+    select(NUM_ENQ, TOP_CVIDM_AIG, TOP_CVAVC_AIG) %>%
+    rename(!!glue("TOP_CVIDM_AIG_{yr}") := TOP_CVIDM_AIG, !!glue("TOP_CVAVC_AIG_{yr}") := TOP_CVAVC_AIG) %>%
+    right_join(data_2019_metro, by = "NUM_ENQ")
+  
+  assign(glue("data_2019_metro"), data_file)
+  rm(data_file)
+  
+  data_file <- 
+    get(glue("data_{yr}_drom")) %>%
+    select(IDENT_IND, TOP_CVIDM_AIG, TOP_CVAVC_AIG) %>%
+    distinct(IDENT_IND, .keep_all = TRUE) %>%
+    rename(!!glue("TOP_CVIDM_AIG_{yr}") := TOP_CVIDM_AIG, !!glue("TOP_CVAVC_AIG_{yr}") := TOP_CVAVC_AIG) %>%
+    right_join(data_2019_drom, by = "IDENT_IND")
+  
+  assign(glue("data_2019_drom"), data_file)
+  rm(data_file)
+}
+
+for (plc in c("metro", "drom")) {
+  data_file <- 
+    get(glue("data_2019_{plc}")) %>%
+    mutate(
+      TOP_CVIDM_AIG_PAST = case_when(
+        TOP_CVIDM_AIG_2015 == 1 ~ 1,
+        TOP_CVIDM_AIG_2016 == 1 ~ 1,
+        TOP_CVIDM_AIG_2017 == 1 ~ 1,
+        TOP_CVIDM_AIG_2017 == 1 ~ 1,
+        TOP_CVIDM_AIG == 1 ~ 0,
+        TRUE ~ 0),
+      last_coronapath = case_when(
+        TOP_CVIDM_AIG_2015 == 1 ~ "Années n-1 à n-4",
+        TOP_CVIDM_AIG_2016 == 1 ~ "Années n-1 à n-4",
+        TOP_CVIDM_AIG_2017 == 1 ~ "Années n-1 à n-4",
+        TOP_CVIDM_AIG_2018 == 1 ~ "Années n-1 à n-4",
+        TOP_CVIDM_AIG == 1 ~ "Année n",
+        TRUE ~ "Aucune ou > 4 ans"),
+      TOP_CVAVC_AIG_PAST = case_when(
+        TOP_CVAVC_AIG_2015 == 1 ~ 1,
+        TOP_CVAVC_AIG_2016 == 1 ~ 1,
+        TOP_CVAVC_AIG_2017 == 1 ~ 1,
+        TOP_CVAVC_AIG_2018 == 1 ~ 1,
+        TOP_CVAVC_AIG == 1 ~ 0,
+        TRUE ~ 0),
+      last_stroke = case_when(
+        TOP_CVAVC_AIG_2015 == 1 ~ "Années n-1 à n-4",
+        TOP_CVAVC_AIG_2016 == 1 ~ "Années n-1 à n-4",
+        TOP_CVAVC_AIG_2017 == 1 ~ "Années n-1 à n-4",
+        TOP_CVAVC_AIG_2018 == 1 ~ "Années n-1 à n-4",
+        TOP_CVAVC_AIG == 1 ~ "Année n",
+        TRUE ~ "Aucun ou > 4 ans")
+    ) %>%
+    set_variable_labels(
+      last_coronapath = "Dernière coronaropathie retrouvée",
+      last_stroke = "Dernier AVC retrouvé")
+  
+  assign(glue("data_2019_{plc}"), data_file)
+  rm(data_file)
+}
+```
+
+```{r eval=FALSE}
+# Comparaison rapide des résultats
+sum(data_2019_metro$TOP_CVIDM_AIG_2015, na.rm = TRUE)
+sum(data_2019_metro$TOP_CVIDM_AIG_2016, na.rm = TRUE)
+sum(data_2019_metro$TOP_CVIDM_AIG_2017, na.rm = TRUE)
+sum(data_2019_metro$TOP_CVIDM_AIG_2018, na.rm = TRUE)
+sum(data_2019_metro$TOP_CVIDM_AIG, na.rm = TRUE)
+sum(data_2019_metro$TOP_CVIDM_AIG_PAST, na.rm = TRUE)
+
+sum(data_2018_metro$TOP_CVIDM_AIG_2015, na.rm = TRUE)
+sum(data_2018_metro$TOP_CVIDM_AIG_2016, na.rm = TRUE)
+sum(data_2018_metro$TOP_CVIDM_AIG_2017, na.rm = TRUE)
+sum(data_2018_metro$TOP_CVIDM_AIG_2018, na.rm = TRUE)
+sum(data_2018_metro$TOP_CVIDM_AIG, na.rm = TRUE)
+sum(data_2018_metro$TOP_CVIDM_AIG_PAST, na.rm = TRUE)
+```
+
+# Analyses
+
+## Echantillon
+
+```{r}
+source("4_sample_analysis.R", encoding = "UTF8")
+```
+
+```{r eval=FALSE}
+# Nombre d'individus interrogés en janvier 2020
+
+int_2020_18 <- data_2018_metro %>%
+  filter(year(refdate) == 2020) %>%
+  nrow()
+cat("Nombre de répondants en 2020 parmi les appariés pour 2018 :", int_2020_18)
+
+cat("\n")
+int_2020_19 <- data_2019_metro %>%
+  filter(year(refdate) == 2020) %>%
+  nrow()
+cat("Nombre de répondants en 2020 parmi les appariés pour 2019 :", int_2020_19)
+```
+
+```{r eval=FALSE}
+# Comparaison rapide des sous_échantillons pour la métropole et les DROM
+mean(data_2019_metro$age)
+mean(data_2019_drom$age)
+
+hist(data_2019_metro$age)
+hist(data_2019_drom$age)
+
+data_2019_metro %>% select(lang_FR) %>% table() %>% prop.table()
+data_2019_drom %>% select(lang_FR) %>% table() %>% prop.table()
+
+hist(data_2019_metro$liter_score)
+hist(data_2019_drom$liter_score)
+
+data_2019_metro %>% select(liter_score_s) %>% table() %>% prop.table()
+data_2019_drom %>% select(liter_score_s) %>% table() %>% prop.table()
+```
+
+## Déclarations dans l'EHIS face aux repérages dans le SNDS
+
+```{r}
+source(glue("5_declarations.R"), encoding = "UTF8")
+```
+
+## Cas de la dépression
+
+```{r}
+source("6_depression.R", encoding = "UTF8")
+
+plot_phq("depression_tt", "vs la prise de traitements antidépresseurs")
+plot_phq("depression_clin", "vs la dépression clinique")
+plot_phq("depression_tt_clin", "vs la prise de traitements antidépresseurs et la dépression clinique")
+plot_phq("depression_all", "vs la prise de traitements antidépresseurs et les troubles névrotiques et de l'humeur")
+```
+
+```{r}
+# rm(df_phq_2, plot_phq)
+```
+
+## Régressions logistiques multinomiales
+
+```{r}
+# Sélection des équivalences EHIS-SNDS retenues
+sub_target <- target %>% 
+  filter(abbr %in% c("CRD", "coropath", "hbp_tt", "stroke", "diab", "depression_all"))
+```
+
+```{r}
+# Régressions courtes
+regressors_drom <- c("sexe", "age_cat", "situa_s", "pcs_s", "hatlevel_ss", "deg_urb", "natio1n_1", "immig_2g", "lang_FR", "pl8_s", "cd1_sum", "liter_score_s", "hs1_s", "proxy", "TOP_PANTIDE_MED", "TOP_CVIDM_AIG", "TOP_CVAVC_AIG")
+
+regressors_metro <- c("sexe", "age_cat", "situa_s", "pcs", "hatlevel_s", "hhincome", "deg_urb", "natio1n_1", "immig_2g", "lang_FR", "pl8_s", "cd1_sum", "liter_score_s", "hs1_s", "qpv", "proxy", "TOP_PANTIDE_MED", "TOP_CVIDM_AIG", "TOP_CVAVC_AIG")
+```
+
+```{r eval=FALSE}
+# Régressions longues
+regressors_drom <- c("sexe", "age_cat", "pcs", "hatlevel", "situa", "couple", "stoc", "deg_urb", "natio1n_1", "immig_2g", "lang_FR", "couv1", "compsant", "hs1", "hs2", "pl8", "phq_score", "liter_score","social_support", "total_ehis_not_snds", "total_snds_not_ehis", "total_ehis_and_snds", "proxy")
+
+regressors_metro <- c("sexe", "age_cat", "pcs", "hatlevel", "situa", "hhincome", "revdispm", "couple", "stoc", "deg_urb", "qpv", "natio1n_1", "immig_2g", "lang_FR", "couv1", "compsant", "hs1", "hs2", "pl8", "phq_score", "liter_score","social_support", "total_ehis_not_snds", "total_snds_not_ehis", "total_ehis_and_snds", "proxy",  "intmethod")
+```
+
+```{r}
+source("7_multinom_reg.R", encoding = "UTF8")
+```
